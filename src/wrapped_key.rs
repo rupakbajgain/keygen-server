@@ -1,5 +1,6 @@
 use ring::aead;
 
+//#[derive(Clone)]
 pub struct WrappedKey {
     pub salt: [u8; 16],
     pub nonce: [u8; aead::NONCE_LEN],

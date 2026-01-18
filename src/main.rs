@@ -11,6 +11,9 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::os::unix::fs::PermissionsExt;
 use zeroize::Zeroizing;
+use serde::{Serialize, Deserialize};
+use std::os::unix::net::UnixStream;
+
 const ITERATIONS: u32 = 100_000;
 
 fn get_master_key_path() -> PathBuf {
@@ -169,21 +172,188 @@ fn decrypt_master_key(password: &str, mut wrapped: WrappedKey) -> std::io::Resul
     Ok(Zeroizing::new(decrypted_slice.to_vec()))
 }
 
+use std::sync::{Arc, Mutex};
+
+struct ServerState {
+    unlocked_key: Option<zeroize::Zeroizing<Vec<u8>>>,
+}
+
+use serde_cbor::from_slice;
+use serde_cbor::to_vec;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Request {
+    pub v: u8,
+    pub cmd: String,
+    #[serde(default)]
+    pub data: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Response {
+    pub ok: bool,
+    #[serde(default)]
+    pub data: Option<Vec<u8>>,
+    #[serde(default)]
+    pub err: Option<String>,
+}
+
+/// Read a single CBOR frame with 4-byte length prefix
+fn read_frame(stream: &mut UnixStream) -> std::io::Result<Option<Vec<u8>>> {
+    let mut len_buf = [0u8; 4];
+    match stream.read_exact(&mut len_buf) {
+        Ok(()) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > 10 * 1024 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
+    }
+
+    let mut buf = vec![0u8; len];
+    match stream.read_exact(&mut buf) {
+        Ok(()) => Ok(Some(buf)),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Write a CBOR frame with 4-byte length prefix
+fn write_frame(stream: &mut UnixStream, data: &[u8]) -> std::io::Result<()> {
+    let len = (data.len() as u32).to_be_bytes();
+    stream.write_all(&len)?;
+    stream.write_all(data)?;
+    Ok(())
+}
+
+/// Handle a single request
+fn handle_request(req: Request, state: &mut ServerState) -> Response {
+    match req.cmd.as_str() {
+        "ping" => Response {
+            ok: true,
+            data: None,
+            err: None,
+        },
+
+        "unlock" => {
+            if let Some(pwd) = req.data {
+                // Convert password bytes to string
+                let password = pwd;
+
+                // Placeholder decryption logic
+                if password == "password" {
+                    state.unlocked_key = Some(Zeroizing::new(b"decrypted-key".to_vec()));
+                    Response {
+                        ok: true,
+                        data: None,
+                        err: None,
+                    }
+                } else {
+                    Response {
+                        ok: false,
+                        data: None,
+                        err: Some("bad password".into()),
+                    }
+                }
+            } else {
+                Response {
+                    ok: false,
+                    data: None,
+                    err: Some("missing password".into()),
+                }
+            }
+        }
+
+        _ => Response {
+            ok: false,
+            data: None,
+            err: Some("unknown command".into()),
+        },
+    }
+}
+
+/// Handle a client connection — now supports multiple requests per connection
+fn handle_client(mut stream: UnixStream, state: Arc<Mutex<ServerState>>) -> std::io::Result<()> {
+    loop {
+        let frame = match read_frame(&mut stream) {
+            Ok(Some(f)) => f,
+            Err(e) => {
+                eprintln!("Read error: {:?}", e);
+                break; // stop loop if client disconnects
+            },
+            Ok(None) => break, //client dc
+        };
+
+        let req: Request = match from_slice(&frame) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("CBOR decode error: {:?}", e);
+                break;
+            }
+        };
+
+        let mut st = state.lock().unwrap();
+        let resp = handle_request(req, &mut st);
+
+        let encoded = match to_vec(&resp) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("CBOR encode error: {:?}", e);
+                break;
+            }
+        };
+
+        if let Err(e) = write_frame(&mut stream, &encoded) {
+            eprintln!("Write error: {:?}", e);
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Start the Unix socket server
 fn start_socket_server() -> std::io::Result<()> {
     let path = get_socket_path();
-    if path.exists() { fs::remove_file(&path)?; }
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
 
     let listener = UnixListener::bind(&path)?;
-    let key_file = load_key_file()?;
 
-    println!("Listening on: {:?}", path);
+    // Restrict socket permissions
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+
+    let _wrapped_key = load_key_file()?; // currently unused
+
+    let state = Arc::new(Mutex::new(ServerState {
+        unlocked_key: None,
+    }));
+
+    println!("Listening on {:?}", path);
 
     for stream in listener.incoming() {
-        let mut s = stream?;
-        let mut buf = [0; 1024];
-        let n = s.read(&mut buf)?;
-        println!("Received: {}", String::from_utf8_lossy(&buf[..n]));
-        s.write_all(b"Handshake OK")?;
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Incoming connection error: {:?}", e);
+                continue;
+            }
+        };
+        let state = Arc::clone(&state);
+
+        std::thread::spawn(move || {
+            if let Err(e) = handle_client(stream, state) {
+                eprintln!("Client error: {}", e);
+            }
+        });
     }
+
     Ok(())
 }
