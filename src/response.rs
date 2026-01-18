@@ -4,6 +4,7 @@ use crate::req_res::ReqRes;
 pub enum Response {
     Ok { msg: String },
     Data { data: Vec<u8> },
+    Key { key: Vec<u8> },
     Error { msg: String },
     ArchiveFields {
         wrapped_key: Vec<u8>,
@@ -26,6 +27,10 @@ impl Response {
             Response::Data { data } => {
                 rr.fields.insert("status".into(), "data".into());
                 rr.fields.insert("data".into(), data.clone());
+            }
+            Response::Key { key } => {
+                rr.fields.insert("status".into(), "key".into());
+                rr.fields.insert("key".into(), key.clone());
             }
             Response::Error { msg } => {
                 rr.fields.insert("status".into(), "error".into());

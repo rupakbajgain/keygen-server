@@ -125,50 +125,64 @@ mod tests {
     #[test]
     fn test_set_and_get_key() {
         let vault = SecretVault::new();
-        let secret = b"my_ultra_secure_key".to_vec();
+        let secret_raw = b"my_ultra_secure_key".to_vec();
 
-        vault.set_key(secret.clone(), Duration::from_secs(10)).unwrap();
+        // Wrap in Zeroizing to match the method signature
+        let secret = Zeroizing::new(secret_raw.clone());
+
+        vault.set_key_from_zeroizing(secret, Duration::from_secs(10)).unwrap();
 
         let retrieved = vault.get_key().expect("Key should exist");
-        assert_eq!(&*retrieved, &secret);
+        assert_eq!(&*retrieved, &secret_raw);
     }
 
     #[test]
     fn test_key_obfuscation() {
         let vault = SecretVault::new();
-        let secret = vec![0xAA, 0xAA, 0xAA, 0xAA];
-        vault.set_key(secret.clone(), Duration::from_secs(10)).unwrap();
+        let secret_raw = vec![0xAA, 0xAA, 0xAA, 0xAA];
+        let secret = Zeroizing::new(secret_raw.clone());
+
+        vault.set_key_from_zeroizing(secret, Duration::from_secs(10)).unwrap();
 
         let state = vault.state.lock().unwrap();
         let masked = state.masked_data.as_ref().unwrap();
-        // Check that the memory doesn't contain the raw key
-        assert_ne!(masked.as_slice(), secret.as_slice());
+
+        // Verify the internal memory is XORed and not plaintext
+        assert_ne!(masked.as_slice(), secret_raw.as_slice());
     }
 
     #[test]
     fn test_expiration() {
         let vault = SecretVault::new();
-        vault.set_key(b"short-lived".to_vec(), Duration::from_millis(100)).unwrap();
+        let secret = Zeroizing::new(b"short-lived".to_vec());
 
+        // Set a very short TTL
+        vault.set_key_from_zeroizing(secret, Duration::from_millis(50)).unwrap();
+
+        // Should be available immediately
         assert!(vault.get_key().is_some());
-        thread::sleep(Duration::from_millis(200));
-        assert!(vault.get_key().is_none());
+
+        // Wait for reaper/expiration logic to kick in
+        thread::sleep(Duration::from_millis(150));
+        assert!(vault.get_key().is_none(), "Key should have expired and been zeroed");
     }
 
     #[test]
     fn test_concurrent_access() {
         let vault = SecretVault::new();
-        let secret = b"concurrent_key".to_vec();
-        vault.set_key(secret.clone(), Duration::from_secs(60)).unwrap();
+        let secret_raw = b"concurrent_key".to_vec();
+        let secret = Zeroizing::new(secret_raw.clone());
+
+        vault.set_key_from_zeroizing(secret, Duration::from_secs(60)).unwrap();
 
         let mut handles = vec![];
         for _ in 0..10 {
             let v = Arc::clone(&vault);
-            let s = secret.clone();
+            let s_expected = secret_raw.clone();
             handles.push(thread::spawn(move || {
-                for _ in 0..10 {
-                    let retrieved = v.get_key().unwrap();
-                    assert_eq!(&*retrieved, &s);
+                for _ in 0..100 {
+                    let retrieved = v.get_key().expect("Vault should still hold the key");
+                    assert_eq!(&*retrieved, &s_expected);
                 }
             }));
         }

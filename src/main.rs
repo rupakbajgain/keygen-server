@@ -7,7 +7,7 @@ mod connection;
 mod server_handler;
 mod paths;
 mod archive_key;
-//mod fingerprint;
+mod derived_keys;
 
 use std::env;
 use std::io::Result;

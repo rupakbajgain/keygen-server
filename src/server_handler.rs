@@ -85,8 +85,6 @@ pub fn start_socket_server(socket_path: &str) -> std::io::Result<()> {
     // 3. Initialize state with the pre-loaded key
     let state = Arc::new(ServerState::new(SecretVault::new(),wrapped_key));
 
-    println!("Listening on: {:?}", socket_path);
-
     // Replace the hex::encode line with this:
     let id_hex: String = state.wrapped_key.id.iter()
     .take(8)
@@ -207,6 +205,33 @@ fn handle_request(req: Request, state: &ServerState) -> Response {
                     }
                 }
                 Err(e) => Response::Error { msg: format!("Failed to load archive key: {}", e) },
+            }
+        }
+
+        Request::DerivedKey { archive_id, purpose, path } => {
+            let archive_keys = state.archive_keys.lock().unwrap();
+
+            let key_id = KeyId(archive_id);
+
+            let Some(archive_key_wrapper) = archive_keys.get(&key_id) else {
+                return Response::Error {
+                    msg: format!("Archive key not loaded for ID: {:?}", archive_id)
+                };
+            };
+
+            let path_opt = if path.is_empty() { None } else { Some(path.as_str()) };
+
+            // 2. Pass the inner bytes of the ArchiveKeyID/Zeroizing wrapper
+            // Usually archive_key_wrapper is a Zeroizing<Vec<u8>> or similar
+            match crate::derived_keys::derive_key(&archive_key_wrapper.0, purpose, path_opt) {
+                Ok(derived_bytes) => {
+                    Response::Key {
+                        key: derived_bytes.to_vec(),
+                    }
+                }
+                Err(e) => {
+                    Response::Error { msg: format!("Derivation failed: {}", e) }
+                }
             }
         }
 
