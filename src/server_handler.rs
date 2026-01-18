@@ -7,6 +7,8 @@ use std::time::Duration;
 use crate::request::Request;
 use crate::response::Response;
 use crate::secret_vault::SecretVault;
+use crate::wrapped_key::WrappedKey;
+use crate::paths::get_master_key_path;
 
 struct ServerState {
     pub vault: Arc<SecretVault>,
@@ -76,19 +78,26 @@ fn handle_request(req: Request, state: &ServerState) -> Response {
         Request::Ping => Response::Ok { msg: "pong".into() },
 
         Request::Pass { password } => {
-            // Logic for unlocking the vault
-            if password == "password" {
-                let secret_key = b"highly-sensitive-master-key".to_vec();
+            // 1. Load the wrapped key from ~/.base0/master.key
+            let wrapped = match WrappedKey::load_from_disk(&get_master_key_path()) {
+                Ok(k) => k,
+                Err(e) => return Response::Error { msg: format!("Failed to load key file: {}", e) },
+            };
 
-                // vault.set_key handles random XOR mask and TTL reaper thread
-                match state.vault.set_key(secret_key, Duration::from_secs(3600)) {
-                    Ok(_) => Response::Ok { msg: "Vault unlocked".into() },
-                    Err(e) => Response::Error { msg: format!("Security error: {}", e) },
+            // 2. Try to decrypt the master key with the user's password
+            match wrapped.decrypt(&password) {
+                Ok(master_key) => {
+                    // 3. Store the decrypted key in the high-security vault
+                    // master_key is already Zeroizing<Vec<u8>>
+                    let ttl = Duration::from_secs(600); // 10 min
+                    match state.vault.set_key_from_zeroizing(master_key, ttl) {
+                        Ok(_) => Response::Ok { msg: "Master key unlocked and vaulted".into() },
+                        Err(e) => Response::Error { msg: format!("Vault error: {}", e) },
+                    }
                 }
-            } else {
-                Response::Error { msg: "Invalid password".into() }
+                Err(_) => Response::Error { msg: "Incorrect master password".into() },
             }
-        },
+        }
 
         Request::Unknown => Response::Error { msg: "Unknown command".into() },
     }

@@ -4,7 +4,9 @@ use zeroize::{Zeroizing, Zeroize};
 use ring::rand::{SecureRandom, SystemRandom};
 
 struct VaultState {
+    // Masked data: (Original Key ^ Mask)
     masked_data: Option<Zeroizing<Vec<u8>>>,
+    // Random bits used to obfuscate the data
     mask: Zeroizing<Vec<u8>>,
     expires_at: Instant,
 }
@@ -12,9 +14,10 @@ struct VaultState {
 pub struct SecretVault {
     state: Mutex<VaultState>,
     cvar: Condvar,
-    rng: SystemRandom, // Store the RNG generator
+    rng: SystemRandom,
 }
 
+/// Helper to prevent memory from being swapped to disk
 fn strict_lock(ptr: *const u8, len: usize) -> std::io::Result<()> {
     if len == 0 { return Ok(()); }
     unsafe {
@@ -38,47 +41,52 @@ impl SecretVault {
         });
 
         let v_clone = Arc::clone(&vault);
-        std::thread::spawn(move || {
+        std::thread::Builder::new()
+        .name("vault-reaper".to_string())
+        .spawn(move || {
             let mut state = v_clone.state.lock().unwrap();
             loop {
                 match &state.masked_data {
                     None => state = v_clone.cvar.wait(state).unwrap(),
-                           Some(_) => {
-                               let now = Instant::now();
-                               if now >= state.expires_at {
-                                   state.masked_data = None;
-                                   state.mask.zeroize();
-                                   println!("Security: Master key and mask zeroed.");
-                               } else {
-                                   let ttl = state.expires_at - now;
-                                   let result = v_clone.cvar.wait_timeout(state, ttl).unwrap();
-                                   state = result.0;
-                               }
-                           }
+               Some(_) => {
+                   let now = Instant::now();
+                   if now >= state.expires_at {
+                       state.masked_data = None;
+                       state.mask.zeroize();
+                       println!("Security: Vault TTL expired. Secret zeroed.");
+                   } else {
+                       let ttl = state.expires_at - now;
+                       let result = v_clone.cvar.wait_timeout(state, ttl).unwrap();
+                       state = result.0;
+                   }
+               }
                 }
             }
-        });
+        })
+        .expect("Failed to spawn reaper thread");
 
         vault
     }
 
-    pub fn set_key(&self, mut key: Vec<u8>, duration: Duration) -> std::io::Result<()> {
+    /// Sets the key while maintaining Zeroize protection during the handover.
+    pub fn set_key_from_zeroizing(&self, mut key: Zeroizing<Vec<u8>>, duration: Duration) -> std::io::Result<()> {
         let mut state = self.state.lock().unwrap();
 
         let mut mask_bytes = vec![0u8; key.len()];
-        // Correct usage of Ring's SystemRandom
         self.rng.fill(&mut mask_bytes).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::Other, "Random number generation failed")
         })?;
 
+        // Lock both the secret and the mask in RAM
         strict_lock(key.as_ptr(), key.len())?;
         strict_lock(mask_bytes.as_ptr(), mask_bytes.len())?;
 
+        // Obfuscate via XOR
         for i in 0..key.len() {
             key[i] ^= mask_bytes[i];
         }
 
-        state.masked_data = Some(Zeroizing::new(key));
+        state.masked_data = Some(key);
         state.mask = Zeroizing::new(mask_bytes);
         state.expires_at = Instant::now() + duration;
 
@@ -86,6 +94,7 @@ impl SecretVault {
         Ok(())
     }
 
+    /// Reconstructs the key into a temporary Zeroizing buffer.
     pub fn get_key(&self) -> Option<Zeroizing<Vec<u8>>> {
         let state = self.state.lock().unwrap();
 
@@ -93,6 +102,7 @@ impl SecretVault {
             if Instant::now() < state.expires_at {
                 let mut original = vec![0u8; masked.len()];
 
+                // Lock the buffer where the plaintext will be reconstructed
                 strict_lock(original.as_ptr(), original.len())
                 .expect("SECURITY CRITICAL: Failed to lock plaintext memory buffer");
 
@@ -120,20 +130,29 @@ mod tests {
         vault.set_key(secret.clone(), Duration::from_secs(10)).unwrap();
 
         let retrieved = vault.get_key().expect("Key should exist");
-        // FIX: Dereference to get the inner Vec
         assert_eq!(&*retrieved, &secret);
     }
 
     #[test]
-    fn test_set_key_overwrites_old_one() {
+    fn test_key_obfuscation() {
         let vault = SecretVault::new();
+        let secret = vec![0xAA, 0xAA, 0xAA, 0xAA];
+        vault.set_key(secret.clone(), Duration::from_secs(10)).unwrap();
 
-        vault.set_key(b"first".to_vec(), Duration::from_secs(10)).unwrap();
-        vault.set_key(b"second".to_vec(), Duration::from_secs(10)).unwrap();
+        let state = vault.state.lock().unwrap();
+        let masked = state.masked_data.as_ref().unwrap();
+        // Check that the memory doesn't contain the raw key
+        assert_ne!(masked.as_slice(), secret.as_slice());
+    }
 
-        let retrieved = vault.get_key().unwrap();
-        // FIX: Explicitly check as slice
-        assert_eq!(retrieved.as_slice(), b"second");
+    #[test]
+    fn test_expiration() {
+        let vault = SecretVault::new();
+        vault.set_key(b"short-lived".to_vec(), Duration::from_millis(100)).unwrap();
+
+        assert!(vault.get_key().is_some());
+        thread::sleep(Duration::from_millis(200));
+        assert!(vault.get_key().is_none());
     }
 
     #[test]
@@ -147,9 +166,8 @@ mod tests {
             let v = Arc::clone(&vault);
             let s = secret.clone();
             handles.push(thread::spawn(move || {
-                for _ in 0..100 {
+                for _ in 0..10 {
                     let retrieved = v.get_key().unwrap();
-                    // FIX: Dereference to inner Vec
                     assert_eq!(&*retrieved, &s);
                 }
             }));

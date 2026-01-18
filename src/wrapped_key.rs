@@ -108,4 +108,9 @@ impl WrappedKey {
 
         Ok(Zeroizing::new(decrypted_slice.to_vec()))
     }
+
+    pub fn load_from_disk(path: &std::path::Path) -> std::io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        Self::from_bytes(bytes)
+    }
 }

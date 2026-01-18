@@ -25,12 +25,14 @@ fn main() -> Result<()> {
 
     match args[1].to_lowercase().as_str() {
         "keygen" => {
-            let key_path = get_master_key_path();
-            WrappedKey::generate(&key_path)?;
-            println!("Key generated successfully at {:?}", key_path);
+            WrappedKey::generate(&get_master_key_path())?;
         }
         "pass" => {
-            println!("Use the client tool to send the password to the daemon.");
+            let pwd = rpassword::prompt_password("Enter Master Password: ")
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+            // Use our connection helper to send the request
+            connection::send_pass_request(&get_socket_path(), &pwd)?;
         }
         _ => {
             eprintln!("Usage: [no args] | keygen | pass");
