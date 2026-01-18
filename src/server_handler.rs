@@ -12,29 +12,50 @@ use crate::paths::get_master_key_path;
 
 struct ServerState {
     pub vault: Arc<SecretVault>,
+    // Load this once at startup
+    pub wrapped_key: WrappedKey,
 }
 
 /// Start the Unix socket server
 pub fn start_socket_server(socket_path: &str) -> std::io::Result<()> {
-    // Cleanup old socket file
+    // 1. Load the wrapped key once before starting the listener
+    let master_key_path = get_master_key_path();
+    if !master_key_path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Master key file not found. Please run 'keygen' first.",
+        ));
+    }
+    let wrapped_key = WrappedKey::load_from_disk(&master_key_path)?;
+
+    // 2. Cleanup old socket file
     if fs::metadata(socket_path).is_ok() {
         fs::remove_file(socket_path)?;
     }
 
     let listener = UnixListener::bind(socket_path)?;
 
-    // Set socket permissions to 0600 (owner only)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
     }
 
+    // 3. Initialize state with the pre-loaded key
     let state = Arc::new(ServerState {
         vault: SecretVault::new(),
+                         wrapped_key,
     });
 
     println!("Listening on: {:?}", socket_path);
+
+    // Replace the hex::encode line with this:
+    let id_hex: String = state.wrapped_key.id.iter()
+    .take(8)
+    .map(|b| format!("{:02x}", b))
+    .collect();
+
+    println!("Loaded Master Key ID: {}", id_hex);
 
     for stream in listener.incoming() {
         match stream {
@@ -42,7 +63,7 @@ pub fn start_socket_server(socket_path: &str) -> std::io::Result<()> {
                 let state_clone = Arc::clone(&state);
                 std::thread::spawn(move || {
                     if let Err(e) = handle_client(s, state_clone) {
-                        eprintln!("Client disconnected with error: {}", e);
+                        eprintln!("Client session error: {}", e);
                     }
                 });
             }
@@ -54,19 +75,14 @@ pub fn start_socket_server(socket_path: &str) -> std::io::Result<()> {
 
 fn handle_client(mut stream: UnixStream, state: Arc<ServerState>) -> std::io::Result<()> {
     loop {
-        // 1. Read Frame (4-byte length + binary body)
         let frame = match read_frame(&mut stream)? {
             Some(f) => f,
-            None => break, // Clean EOF
+            None => break,
         };
 
-        // 2. Parse binary into Request Enum
         let req = Request::from_binary(&frame);
-
-        // 3. Process the command
         let resp = handle_request(req, &state);
 
-        // 4. Convert Response Enum to binary and write frame
         let encoded_res = resp.to_binary();
         write_frame(&mut stream, &encoded_res)?;
     }
@@ -77,19 +93,16 @@ fn handle_request(req: Request, state: &ServerState) -> Response {
     match req {
         Request::Ping => Response::Ok { msg: "pong".into() },
 
-        Request::Pass { password } => {
-            // 1. Load the wrapped key from ~/.base0/master.key
-            let wrapped = match WrappedKey::load_from_disk(&get_master_key_path()) {
-                Ok(k) => k,
-                Err(e) => return Response::Error { msg: format!("Failed to load key file: {}", e) },
-            };
+        // No more disk I/O here
+        Request::GetID => Response::Data {
+            data: state.wrapped_key.id.to_vec()
+        },
 
-            // 2. Try to decrypt the master key with the user's password
-            match wrapped.decrypt(&password) {
+        Request::Pass { password } => {
+            // Use the pre-loaded key from state
+            match state.wrapped_key.decrypt(&password) {
                 Ok(master_key) => {
-                    // 3. Store the decrypted key in the high-security vault
-                    // master_key is already Zeroizing<Vec<u8>>
-                    let ttl = Duration::from_secs(600); // 10 min
+                    let ttl = Duration::from_secs(600);
                     match state.vault.set_key_from_zeroizing(master_key, ttl) {
                         Ok(_) => Response::Ok { msg: "Master key unlocked and vaulted".into() },
                         Err(e) => Response::Error { msg: format!("Vault error: {}", e) },

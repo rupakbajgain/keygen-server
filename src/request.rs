@@ -3,6 +3,7 @@ use crate::req_res::ReqRes;
 #[derive(Debug, PartialEq)]
 pub enum Request {
     Pass { password: String },
+    GetID,
     Ping,
     Unknown,
 }
@@ -25,6 +26,7 @@ impl Request {
                 .unwrap_or_default();
                 Request::Pass { password }
             }
+            "get_master_id" => Request::GetID,
             "ping" => Request::Ping,
             _ => Request::Unknown,
         }

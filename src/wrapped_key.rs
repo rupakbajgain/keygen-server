@@ -11,26 +11,31 @@ const ITERATIONS: u32 = 100_000;
 pub struct WrappedKey {
     pub salt: [u8; 16],
     pub nonce: [u8; aead::NONCE_LEN],
+    pub id: [u8; 32], // New ID field
     pub ciphertext: Vec<u8>,
 }
 
 impl WrappedKey {
     pub fn from_bytes(mut bytes: Vec<u8>) -> std::io::Result<Self> {
-        if bytes.len() < 16 + aead::NONCE_LEN + 16 {
+        if bytes.len() < 16 + aead::NONCE_LEN + 32 + 16 {
             return Err(Error::new(ErrorKind::InvalidData, "Key file too small"));
         }
 
         let mut salt = [0u8; 16];
         let mut nonce = [0u8; aead::NONCE_LEN];
+        let mut id = [0u8; 32];
 
-        let remaining = bytes.split_off(16);
+        // Component Extraction
+        let mut remaining = bytes.split_off(16);
         salt.copy_from_slice(&bytes);
 
-        let mut remaining = remaining;
-        let ciphertext = remaining.split_off(aead::NONCE_LEN);
+        let mut next_remaining = remaining.split_off(12);
         nonce.copy_from_slice(&remaining);
 
-        Ok(Self { salt, nonce, ciphertext })
+        let ciphertext = next_remaining.split_off(32);
+        id.copy_from_slice(&next_remaining);
+
+        Ok(Self { salt, nonce, id, ciphertext })
     }
 
     pub fn generate(path: &PathBuf) -> std::io::Result<()> {
@@ -64,6 +69,9 @@ impl WrappedKey {
         let mut actual_key = [0u8; 32];
         rng.fill(&mut actual_key).map_err(|_| Error::new(ErrorKind::Other, "RNG failed"))?;
 
+        let mut id = [0u8; 32];
+        rng.fill(&mut id).map_err(|_| Error::new(ErrorKind::Other, "RNG failed"))?;
+
         let unbound_key = aead::UnboundKey::new(&aead::AES_256_GCM, &wrapping_key_bytes)
         .map_err(|_| Error::new(ErrorKind::Other, "Invalid key length"))?;
         let sealing_key = aead::LessSafeKey::new(unbound_key);
@@ -80,6 +88,7 @@ impl WrappedKey {
         f.set_permissions(fs::Permissions::from_mode(0o600))?;
         f.write_all(&salt)?;
         f.write_all(&nonce_bytes)?;
+        f.write_all(&id)?;
         f.write_all(&in_out)?;
 
         Ok(())
