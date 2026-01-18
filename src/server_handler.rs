@@ -135,13 +135,43 @@ fn handle_request(req: Request, state: &ServerState) -> Response {
         },
 
         Request::Pass { password } => {
-            // Use the pre-loaded key from state
             match state.wrapped_key.decrypt(&password) {
                 Ok(master_key) => {
-                    let ttl = Duration::from_secs(600);
-                    match state.vault.set_key_from_zeroizing(master_key, ttl) {
-                        Ok(_) => Response::Ok { msg: "Master key unlocked and vaulted".into() },
-                        Err(e) => Response::Error { msg: format!("Vault error: {}", e) },
+                    let ttl = Duration::from_secs(3600); // 1 hour session
+
+                    // 1. Vault the Master Key
+                    if let Err(e) = state.vault.set_key_from_zeroizing(master_key, ttl) {
+                        return Response::Error { msg: format!("Vault error: {}", e) };
+                    }
+
+                    // 2. Proactively derive the "Virtual Archive" key (ID 0x00...)
+                    // We need to re-get the key from the vault or use the zeroizing result
+                    if let Some(master_plaintext) = state.vault.get_key() {
+                        let virtual_id = [0u8; 16];
+                        let arch_path = "/virtual-archive/"; // Your specified path
+
+                        match crate::derived_keys::derive_key(
+                            &master_plaintext,
+                            crate::derived_keys::KeyPurpose::ArchiveHeader,
+                            Some(arch_path)
+                        ) {
+                            Ok(derived_bytes) => {
+                                // 3. Insert into the session map so QuickDerive can find it later
+                                state.insert_archive_key(virtual_id, derived_bytes);
+
+                                Response::Ok {
+                                    msg: "Master unlocked. Virtual archive (0x00...) initialized.".into()
+                                }
+                            }
+                            Err(e) => {
+                                // If derivation fails, we still unlocked, but warn about virtual init
+                                Response::Ok {
+                                    msg: format!("Master unlocked, but virtual init failed: {}", e)
+                                }
+                            }
+                        }
+                    } else {
+                        Response::Error { msg: "Vault state error after unlock".into() }
                     }
                 }
                 Err(_) => Response::Error { msg: "Incorrect master password".into() },
