@@ -5,6 +5,8 @@ pub enum Request {
     Pass { password: String },
     GetID,
     Ping,
+    ArchiveGen,
+    ArchiveLoad { wrapped_key: Vec<u8>, nonce: [u8; 12], archive_id: [u8; 16] },
     Unknown,
 }
 

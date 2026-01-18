@@ -5,6 +5,11 @@ pub enum Response {
     Ok { msg: String },
     Data { data: Vec<u8> },
     Error { msg: String },
+    ArchiveFields {
+        wrapped_key: Vec<u8>,
+        nonce: [u8; 12],      // Matches NONCE_SIZE
+        archive_id: [u8; 16], // Matches ARCHIVE_ID_SIZE
+    },
 }
 
 impl Response {
@@ -25,6 +30,12 @@ impl Response {
             Response::Error { msg } => {
                 rr.fields.insert("status".into(), "error".into());
                 rr.fields.insert("msg".into(), msg.as_bytes().to_vec());
+            }
+            Response::ArchiveFields {wrapped_key,nonce,archive_id } => {
+                rr.fields.insert("status".into(), "ArchiveFields".into());
+                rr.fields.insert("wrapped_key".into(), wrapped_key.clone());
+                rr.fields.insert("nonce".into(), nonce.to_vec());
+                rr.fields.insert("archive_id".into(), archive_id.to_vec());
             }
         }
 
