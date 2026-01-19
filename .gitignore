@@ -1,3 +1,4 @@
 /target
 /python/venv/*
 Cargo.lock
+__pycache__

@@ -29,7 +29,7 @@ fn main() -> Result<()> {
         "keygen" => {
             WrappedKey::generate(&get_master_key_path())?;
         }
-        "pass" => {
+        "unlock" => {
             let pwd = rpassword::prompt_password("Enter Master Password: ")
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
