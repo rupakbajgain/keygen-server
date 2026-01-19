@@ -44,3 +44,5 @@ See test.py for usage.
 ## Maintenance
 Uninstall: `./uninstall.sh`
 Logs: `journalctl --user -u keyserver.service -f`
+
+* Used llm during its creation. So, skip if ...
