@@ -17,5 +17,5 @@ pub fn get_socket_path() -> PathBuf {
     if !base_path.exists() {
         fs::create_dir_all(&base_path).expect("Failed to create socket dir");
     }
-    base_path.join("keyserver.socket")
+    base_path.join("keyserver.sock")
 }

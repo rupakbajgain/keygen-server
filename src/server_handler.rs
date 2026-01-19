@@ -4,6 +4,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::time::Duration;
 use zeroize::Zeroize;
+use listenfd::ListenFd;
 
 use std::sync::Mutex;
 use std::collections::HashMap;
@@ -14,6 +15,7 @@ use crate::secret_vault::SecretVault;
 use crate::wrapped_key::WrappedKey;
 use crate::paths::get_master_key_path;
 use crate::archive_key::{ArchiveKey,ARCHIVE_KEY_SIZE,ARCHIVE_ID_SIZE};
+
 
 #[derive(Eq, Hash, PartialEq)]
 pub struct KeyId(pub [u8; ARCHIVE_ID_SIZE]);
@@ -69,18 +71,31 @@ pub fn start_socket_server(socket_path: &str) -> std::io::Result<()> {
     }
     let wrapped_key = WrappedKey::load_from_disk(&master_key_path)?;
 
-    // 2. Cleanup old socket file
-    if fs::metadata(socket_path).is_ok() {
-        fs::remove_file(socket_path)?;
-    }
+    // 2. get socket
+    let mut listenfd = ListenFd::from_env();
 
-    let listener = UnixListener::bind(socket_path)?;
+    let listener = if let Some(l) = listenfd.take_unix_listener(0)? {
+        // CASE A: systemd handed us the socket
+        println!("Using socket passed by systemd: {}", socket_path);
+        l
+    } else {
+        // CASE B: Manual run (not started by systemd socket)
+        println!("Manual start. Binding to: {}", socket_path);
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
-    }
+        // Cleanup old socket file only if we are the ones creating it
+        if fs::metadata(socket_path).is_ok() {
+            fs::remove_file(socket_path)?;
+        }
+
+        let l = UnixListener::bind(socket_path)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
+        }
+        l
+    };
 
     // 3. Initialize state with the pre-loaded key
     let state = Arc::new(ServerState::new(SecretVault::new(),wrapped_key));

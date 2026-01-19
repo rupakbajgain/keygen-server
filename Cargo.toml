@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 home = "0.5.12"
 libc = "0.2.180"
+listenfd = "1.0.2"
 ring = "0.17.14"
 rpassword = "7.4.0"
 serde = { version = "1.0.228", features = ["derive"] }

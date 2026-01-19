@@ -2,7 +2,7 @@ import socket
 import struct
 import os
 
-SOCKET_PATH = f"/run/user/{os.getuid()}/mfs/keyserver.socket"
+SOCKET_PATH = f"/run/user/{os.getuid()}/mfs/keyserver.sock"
 RECV_TIMEOUT = 5.0  # seconds
 
 def encode_req_res(fields: dict):
@@ -90,7 +90,7 @@ def main():
         # Note: archive_id must be exactly 16 bytes
         send(sock, {
             "command": "derived.key",
-            "archive_id": b"\x07" * 16,
+            "archive_id": b"\x00" * 16,
             "purpose": "signing",
             "path": "m/0/1"
         })
